@@ -3,8 +3,6 @@
 A full event registration and ticketing platform built entirely on AWS serverless services.
 Users sign up, register for events, receive a QR code ticket by email, get a reminder 24 hours before the event, and are checked in at the door by scanning their QR code.
 
-> The live demo (`event.subhe.site`) ran on my AWS account and has been taken down. Screenshots from the running system are below.
-
 ![Architecture](docs/architecture.png)
 
 ## 📸 Screenshots
