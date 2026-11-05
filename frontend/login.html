@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>تسجيل الدخول</title>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <nav id="nav" class="nav"></nav>
+
+  <main class="container narrow">
+    <div class="tabs">
+      <button class="tab active" data-tab="login">تسجيل الدخول</button>
+      <button class="tab" data-tab="signup">حساب جديد</button>
+    </div>
+
+    <div id="message" class="message" hidden></div>
+
+    <!-- Login -->
+    <form id="login" class="panel">
+      <label>البريد الإلكتروني
+        <input type="email" name="email" required autocomplete="email" />
+      </label>
+      <label>كلمة المرور
+        <input type="password" name="password" required autocomplete="current-password" />
+      </label>
+      <button class="btn" type="submit">دخول</button>
+    </form>
+
+    <!-- Sign up -->
+    <form id="signup" class="panel" hidden>
+      <label>الاسم
+        <input type="text" name="name" required minlength="2" maxlength="60" />
+      </label>
+      <label>البريد الإلكتروني
+        <input type="email" name="email" required autocomplete="email" />
+      </label>
+      <label>كلمة المرور
+        <input type="password" name="password" required minlength="8" autocomplete="new-password" />
+        <small class="muted">8 أحرف على الأقل، وفيها حرف كبير وحرف صغير ورقم ورمز مثل !@#</small>
+      </label>
+      <button class="btn" type="submit">إنشاء الحساب</button>
+    </form>
+
+    <!-- Confirm code -->
+    <form id="confirm" class="panel" hidden>
+      <p>أرسلنا رمز تأكيد إلى بريدك. اكتبه هنا:</p>
+      <label>البريد الإلكتروني
+        <input type="email" name="email" required />
+      </label>
+      <label>رمز التأكيد
+        <input type="text" name="code" required inputmode="numeric" maxlength="6" />
+      </label>
+      <button class="btn" type="submit">تأكيد</button>
+      <button class="btn btn-light" type="button" id="resend">إعادة إرسال الرمز</button>
+    </form>
+  </main>
+
+  <script src="js/config.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/nav.js"></script>
+  <script>
+    const forms = ["login", "signup", "confirm"];
+    function showForm(id) {
+      forms.forEach((f) => (document.getElementById(f).hidden = f !== id));
+      document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === id));
+    }
+    document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => showForm(t.dataset.tab)));
+
+    // Only allow redirects to our own pages
+    const next = new URLSearchParams(location.search).get("next");
+    // Allow "page.html" or "event.html?id=<uuid>" only, never an outside URL (open redirect protection)
+    const redirectTo = next && /^[\w-]+\.html(\?id=[0-9a-f-]{36})?$/i.test(next) ? next : "index.html";
+
+    document.getElementById("login").onsubmit = async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      try {
+        await Auth.login(f.email.value.trim(), f.password.value);
+        location.href = redirectTo;
+      } catch (err) {
+        if (err.message.includes("not confirmed")) {
+          document.getElementById("confirm").email.value = f.email.value.trim();
+          showForm("confirm");
+          showMessage("حسابك غير مؤكد بعد. اكتب رمز التأكيد.", "info");
+        } else {
+          showMessage("فشل الدخول: " + err.message, "error");
+        }
+      }
+    };
+
+    document.getElementById("signup").onsubmit = async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      try {
+        await Auth.signUp(f.name.value.trim(), f.email.value.trim(), f.password.value);
+        document.getElementById("confirm").email.value = f.email.value.trim();
+        showForm("confirm");
+        showMessage("تم إنشاء الحساب. تحقق من بريدك.", "success");
+      } catch (err) {
+        showMessage("تعذّر إنشاء الحساب: " + err.message, "error");
+      }
+    };
+
+    document.getElementById("confirm").onsubmit = async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      try {
+        await Auth.confirmSignUp(f.email.value.trim(), f.code.value.trim());
+        showForm("login");
+        document.getElementById("login").email.value = f.email.value.trim();
+        showMessage("تم تأكيد الحساب. سجّل دخولك الآن.", "success");
+      } catch (err) {
+        showMessage("رمز غير صحيح: " + err.message, "error");
+      }
+    };
+
+    document.getElementById("resend").onclick = async () => {
+      const email = document.getElementById("confirm").email.value.trim();
+      if (!email) return showMessage("اكتب بريدك أولاً.", "error");
+      try {
+        await Auth.resendCode(email);
+        showMessage("تم إرسال رمز جديد.", "success");
+      } catch (err) {
+        showMessage(err.message, "error");
+      }
+    };
+  </script>
+</body>
+</html>

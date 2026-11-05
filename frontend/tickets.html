@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>تذاكري</title>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <nav id="nav" class="nav"></nav>
+
+  <main class="container">
+    <h1>تذاكري</h1>
+    <div id="message" class="message" hidden></div>
+    <p id="loading" class="muted">جاري التحميل...</p>
+    <div id="tickets" class="grid"></div>
+  </main>
+
+  <script src="js/config.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/nav.js"></script>
+  <script>
+    async function loadTickets() {
+      const list = document.getElementById("tickets");
+      const loading = document.getElementById("loading");
+      try {
+        const { tickets } = await apiFetch("/me/tickets", { auth: true });
+        list.innerHTML = "";
+        if (tickets.length === 0) {
+          loading.textContent = "ما عندك تذاكر لسا. سجّل في فعالية من صفحة الفعاليات.";
+          return;
+        }
+        loading.hidden = true;
+        tickets.forEach((t) => list.appendChild(ticketCard(t)));
+      } catch (err) {
+        loading.hidden = true;
+        showMessage("تعذّر تحميل التذاكر: " + err.message, "error");
+      }
+    }
+
+    function ticketCard(t) {
+      const card = document.createElement("article");
+      card.className = "card ticket";
+
+      if (t.event?.imageKey) {
+        const img = document.createElement("img");
+        img.src = "/" + t.event.imageKey;
+        img.alt = t.event.title;
+        img.onerror = () => img.remove();
+        card.appendChild(img);
+      }
+
+      const body = document.createElement("div");
+      body.className = "card-body";
+
+      const title = document.createElement("h2");
+      title.textContent = t.event ? t.event.title : "فعالية محذوفة";
+      body.appendChild(title);
+
+      if (t.event) {
+        const date = document.createElement("p");
+        date.textContent = "📅 " + formatDate(t.event.date);
+        const place = document.createElement("p");
+        place.textContent = "📍 " + t.event.location;
+        body.append(date, place);
+      }
+
+      // Status badge
+      const badge = document.createElement("span");
+      const isPast = t.event && new Date(t.event.date) < new Date();
+      if (t.checkedIn) {
+        badge.className = "badge badge-done";
+        badge.textContent = "✔ تم الحضور";
+      } else if (isPast) {
+        badge.className = "badge badge-past";
+        badge.textContent = "انتهت";
+      } else {
+        badge.className = "badge badge-ok";
+        badge.textContent = "قادمة";
+      }
+      body.appendChild(badge);
+
+      // QR code (created by sendTicket a few seconds after registering)
+      if (t.qrKey) {
+        const qr = document.createElement("img");
+        qr.className = "qr";
+        qr.src = "/" + t.qrKey;
+        qr.alt = "QR code";
+        qr.onerror = () => qr.remove();
+        body.appendChild(qr);
+      } else if (!t.checkedIn) {
+        const wait = document.createElement("p");
+        wait.className = "muted";
+        wait.textContent = "⏳ جاري تجهيز رمز QR... حدّث الصفحة بعد لحظات";
+        body.appendChild(wait);
+      }
+
+      // Ticket number
+      // Label in normal font; only the code is monospace (letter-spacing breaks Arabic letters)
+      const code = document.createElement("p");
+      code.className = "muted";
+      code.textContent = "رقم التذكرة: ";
+      const num = document.createElement("span");
+      num.className = "ticket-code";
+      num.textContent = t.ticketId.slice(0, 8).toUpperCase();
+      code.appendChild(num);
+      body.appendChild(code);
+
+      card.appendChild(body);
+      return card;
+    }
+
+    loadTickets();
+  </script>
+</body>
+</html>

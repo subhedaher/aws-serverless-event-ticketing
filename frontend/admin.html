@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>لوحة المشرف</title>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <nav id="nav" class="nav"></nav>
+
+  <main class="container">
+    <h1>لوحة المشرف</h1>
+    <div id="message" class="message" hidden></div>
+
+    <section class="panel">
+      <h2>إضافة فعالية جديدة</h2>
+      <form id="create-event">
+        <label>عنوان الفعالية
+          <input type="text" name="title" required minlength="3" maxlength="100" />
+        </label>
+        <label>التاريخ والوقت
+          <input type="datetime-local" name="date" required />
+        </label>
+        <label>المكان
+          <input type="text" name="location" required minlength="2" maxlength="100" />
+        </label>
+        <label>وصف الفعالية (اختياري)
+          <textarea name="description" rows="5" maxlength="2000" placeholder="شو رح يصير بالفعالية؟ لمين مناسبة؟ شو لازم يجيبوا معهم؟"></textarea>
+        </label>
+        <label>عدد المقاعد
+          <input type="number" name="capacity" required min="1" max="10000" value="50" />
+        </label>
+        <label>صورة الفعالية (اختياري)
+          <input type="file" name="image" accept="image/jpeg,image/png,image/webp" />
+          <small class="muted">أي حجم. الصور الكبيرة بتتصغّر تلقائياً قبل الرفع.</small>
+        </label>
+        <button class="btn" type="submit" id="save-btn">حفظ الفعالية</button>
+      </form>
+    </section>
+
+    <section class="panel">
+      <h2>إحصائيات الفعاليات</h2>
+      <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr><th>الفعالية</th><th>التاريخ</th><th>المسجلون</th><th>الحضور</th><th>نسبة الحضور</th></tr>
+        </thead>
+        <tbody id="events-table"></tbody>
+      </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="js/config.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/nav.js"></script>
+  <script>
+    // UI guard only. The API also rejects non-admins.
+    if (!Auth.isAdmin()) location.href = "index.html";
+
+    async function loadEvents() {
+      const tbody = document.getElementById("events-table");
+      try {
+        // All events (past too), with attendance numbers
+        const { events } = await apiFetch("/admin/stats", { auth: true });
+        tbody.innerHTML = "";
+        const now = new Date();
+        events.forEach((ev) => {
+          const tr = document.createElement("tr");
+          const isPast = new Date(ev.date) < now;
+          const rate = ev.registered > 0 ? `${ev.attendanceRate}%` : "—";
+          [ev.title, formatDate(ev.date), `${ev.registered} / ${ev.capacity}`, String(ev.checkedIn), rate].forEach((text, i) => {
+            const td = document.createElement("td");
+            td.textContent = text;
+            if (i === 4) td.className = "rate";
+            tr.appendChild(td);
+          });
+          if (isPast) tr.className = "past-row";
+          tbody.appendChild(tr);
+        });
+      } catch (err) {
+        showMessage(err.message, "error");
+      }
+    }
+
+    // Shrinks big photos in the browser before upload: max 1600px wide, JPEG quality 0.85.
+    // A 10 MB camera photo usually becomes ~300-600 KB, which also loads faster for visitors.
+    async function prepareImage(file) {
+      const MAX_SIDE = 1600;
+      const bitmap = await createImageBitmap(file);
+      const scale = Math.min(1, MAX_SIDE / Math.max(bitmap.width, bitmap.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(bitmap.width * scale);
+      canvas.height = Math.round(bitmap.height * scale);
+      canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.85));
+      if (!blob || blob.size > 5 * 1024 * 1024) throw new Error("تعذّر تصغير الصورة. جرّب صورة أخرى.");
+      return blob; // always image/jpeg
+    }
+
+    // 0) prepare the image  1) create the event  2) ask for an upload URL  3) PUT the image straight to S3
+    document.getElementById("create-event").onsubmit = async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      const btn = document.getElementById("save-btn");
+      btn.disabled = true;
+
+      try {
+        // Check the image BEFORE saving anything, so a bad image never leaves an event without a picture
+        const file = f.image.files[0];
+        let image = null;
+        if (file) {
+          if (!file.type.startsWith("image/")) throw new Error("الملف المختار ليس صورة");
+          showMessage("جاري تجهيز الصورة...", "info");
+          image = await prepareImage(file);
+        }
+
+        const { event } = await apiFetch("/events", {
+          method: "POST",
+          auth: true,
+          body: {
+            title: f.title.value.trim(),
+            date: new Date(f.date.value).toISOString(), // store in UTC
+            location: f.location.value.trim(),
+            description: f.description.value.trim(),
+            capacity: Number(f.capacity.value),
+          },
+        });
+
+        if (image) {
+          const { uploadUrl } = await apiFetch(`/events/${event.eventId}/upload-url`, {
+            method: "POST",
+            auth: true,
+            body: { contentType: "image/jpeg" },
+          });
+          const upload = await fetch(uploadUrl, {
+            method: "PUT",
+            headers: { "Content-Type": "image/jpeg" },
+            body: image,
+          });
+          if (!upload.ok) throw new Error("تم حفظ الفعالية لكن فشل رفع الصورة");
+        }
+
+        showMessage("تم حفظ الفعالية ✅", "success");
+        f.reset();
+        loadEvents();
+      } catch (err) {
+        showMessage(err.message, "error");
+      } finally {
+        btn.disabled = false;
+      }
+    };
+
+    loadEvents();
+  </script>
+</body>
+</html>

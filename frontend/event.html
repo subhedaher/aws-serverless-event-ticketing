@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>تفاصيل الفعالية</title>
+  <meta property="og:site_name" content="فعالياتي" />
+  <meta property="og:title" content="فعالياتي: سجّل في الفعاليات القادمة" />
+  <meta property="og:description" content="سجّل بضغطة، واستلم تذكرتك بـ QR على الإيميل." />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <nav id="nav" class="nav"></nav>
+
+  <main class="container detail">
+    <a href="index.html" class="back">→ كل الفعاليات</a>
+    <div id="message" class="message" hidden></div>
+    <p id="loading" class="muted">جاري التحميل...</p>
+
+    <article id="event" class="detail-card" hidden>
+      <img id="ev-image" class="detail-image" alt="" hidden />
+      <div class="detail-body">
+        <h1 id="ev-title"></h1>
+
+        <ul class="facts">
+          <li>📅 <span id="ev-date"></span></li>
+          <li>📍 <a id="ev-location" target="_blank" rel="noopener"></a></li>
+          <li>🎟️ <span id="ev-seats"></span></li>
+        </ul>
+
+        <div id="ev-actions" class="detail-actions"></div>
+
+        <section id="ev-about" hidden>
+          <h2>عن الفعالية</h2>
+          <p id="ev-description" class="description"></p>
+        </section>
+
+        <section class="share">
+          <h2>شارك الفعالية</h2>
+          <div class="share-buttons">
+            <button class="btn btn-light" id="copy-btn">🔗 نسخ الرابط</button>
+            <a class="btn btn-light" id="whatsapp-btn" target="_blank" rel="noopener">💬 واتساب</a>
+            <a class="btn btn-light" id="calendar-btn" target="_blank" rel="noopener">📆 أضف للتقويم</a>
+          </div>
+        </section>
+      </div>
+    </article>
+  </main>
+
+  <script src="js/config.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/nav.js"></script>
+  <script>
+    const eventId = new URLSearchParams(location.search).get("id");
+    const pageUrl = location.origin + location.pathname + "?id=" + encodeURIComponent(eventId || "");
+
+    // Google Calendar wants dates like 20261121T160000Z
+    const calDate = (d) => d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+
+    async function loadMyTicket() {
+      if (!Auth.getUser()) return null;
+      try {
+        const { tickets } = await apiFetch("/me/tickets", { auth: true });
+        return tickets.find((t) => t.eventId === eventId) || null;
+      } catch {
+        return null; // the page still works if this fails
+      }
+    }
+
+    async function load() {
+      const loading = document.getElementById("loading");
+      if (!/^[0-9a-f-]{36}$/i.test(eventId || "")) {
+        loading.hidden = true;
+        return showMessage("رابط الفعالية غير صحيح.", "error");
+      }
+      try {
+        const [{ event }, myTicket] = await Promise.all([apiFetch(`/events/${eventId}`), loadMyTicket()]);
+        render(event, myTicket);
+        loading.hidden = true;
+      } catch (err) {
+        loading.hidden = true;
+        showMessage(err.message.includes("not found") ? "الفعالية غير موجودة أو تم حذفها." : err.message, "error");
+      }
+    }
+
+    // All text goes through textContent, so event data can never inject HTML
+    function render(ev, myTicket) {
+      document.title = ev.title + " | فعالياتي";
+      document.getElementById("ev-title").textContent = ev.title;
+      document.getElementById("ev-date").textContent = formatDate(ev.date);
+
+      const loc = document.getElementById("ev-location");
+      loc.textContent = ev.location;
+      loc.href = "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(ev.location);
+
+      const isPast = new Date(ev.date) < new Date();
+      document.getElementById("ev-seats").textContent = isPast
+        ? "انتهت هذه الفعالية"
+        : ev.seatsLeft > 0 ? `${ev.seatsLeft} مقعد متبقي من ${ev.capacity}` : "اكتمل العدد";
+
+      if (ev.imageKey) {
+        const img = document.getElementById("ev-image");
+        img.src = "/" + ev.imageKey;
+        img.alt = ev.title;
+        img.onerror = () => img.remove();
+        img.hidden = false;
+      }
+
+      if (ev.description) {
+        document.getElementById("ev-description").textContent = ev.description;
+        document.getElementById("ev-about").hidden = false;
+      }
+
+      renderActions(ev, myTicket, isPast);
+
+      // Share links
+      const shareText = `${ev.title}\n📅 ${formatDate(ev.date)}\n📍 ${ev.location}\n${pageUrl}`;
+      document.getElementById("whatsapp-btn").href = "https://wa.me/?text=" + encodeURIComponent(shareText);
+      const start = new Date(ev.date);
+      const end = new Date(start.getTime() + 2 * 3600 * 1000); // we don't store an end time, assume 2 hours
+      document.getElementById("calendar-btn").href =
+        "https://calendar.google.com/calendar/render?action=TEMPLATE" +
+        "&text=" + encodeURIComponent(ev.title) +
+        "&dates=" + calDate(start) + "/" + calDate(end) +
+        "&location=" + encodeURIComponent(ev.location) +
+        "&details=" + encodeURIComponent(pageUrl);
+
+      document.getElementById("event").hidden = false;
+    }
+
+    function renderActions(ev, myTicket, isPast) {
+      const box = document.getElementById("ev-actions");
+      box.innerHTML = "";
+      const note = (text, cls = "registered") => {
+        const p = document.createElement("p");
+        p.className = cls;
+        p.textContent = text;
+        box.appendChild(p);
+      };
+      const button = (text, cls, onclick, disabled = false) => {
+        const b = document.createElement("button");
+        b.className = cls;
+        b.textContent = text;
+        b.disabled = disabled;
+        b.onclick = () => onclick(b);
+        box.appendChild(b);
+        return b;
+      };
+
+      if (myTicket?.checkedIn) {
+        note("✅ تم تسجيل حضورك");
+      } else if (myTicket) {
+        note("✅ أنت مسجّل في هذه الفعالية");
+        const link = document.createElement("a");
+        link.href = "tickets.html";
+        link.className = "btn";
+        link.textContent = "عرض تذكرتي";
+        box.appendChild(link);
+        if (!isPast) button("إلغاء تسجيلي", "btn btn-light", cancelRegistration);
+      } else if (isPast) {
+        // "انتهت هذه الفعالية" is already shown in the facts list
+      } else {
+        button(ev.seatsLeft > 0 ? "سجّل الآن" : "اكتمل العدد", "btn btn-big", register, ev.seatsLeft <= 0);
+      }
+    }
+
+    async function register(btn) {
+      btn.disabled = true;
+      try {
+        await apiFetch(`/events/${eventId}/register`, { method: "POST", auth: true });
+        showMessage("تم تسجيلك بنجاح 🎉 ستصلك التذكرة على الإيميل خلال لحظات.", "success");
+        setTimeout(load, 1000); // GSI1 updates a moment after the write
+      } catch (err) {
+        showMessage(err.message, "error");
+        btn.disabled = false;
+      }
+    }
+
+    async function cancelRegistration(btn) {
+      if (!confirm("هل تريد إلغاء تسجيلك في هذه الفعالية؟")) return;
+      btn.disabled = true;
+      try {
+        await apiFetch(`/events/${eventId}/register`, { method: "DELETE", auth: true });
+        showMessage("تم إلغاء تسجيلك.", "success");
+        setTimeout(load, 1000);
+      } catch (err) {
+        showMessage(err.message, "error");
+        btn.disabled = false;
+      }
+    }
+
+    document.getElementById("copy-btn").onclick = async (e) => {
+      try {
+        await navigator.clipboard.writeText(pageUrl);
+        e.target.textContent = "✔ تم النسخ";
+        setTimeout(() => (e.target.textContent = "🔗 نسخ الرابط"), 2000);
+      } catch {
+        prompt("انسخ الرابط:", pageUrl);
+      }
+    };
+
+    load();
+  </script>
+</body>
+</html>

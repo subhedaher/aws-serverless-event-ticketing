@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>تسجيل الحضور</title>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <nav id="nav" class="nav"></nav>
+
+  <main class="container narrow">
+    <h1>تسجيل الحضور</h1>
+    <div id="message" class="message" hidden></div>
+
+    <section class="panel">
+      <label>الفعالية
+        <select id="event-select"></select>
+      </label>
+      <p class="muted" id="counter"></p>
+      <button class="btn" id="start-btn">📷 تشغيل الكاميرا</button>
+      <button class="btn btn-light" id="stop-btn" hidden>إيقاف الكاميرا</button>
+    </section>
+
+    <div id="reader" class="reader"></div>
+
+    <div id="result" class="scan-result" hidden>
+      <div id="result-icon" class="scan-icon"></div>
+      <div id="result-title" class="scan-title"></div>
+      <div id="result-name" class="scan-name"></div>
+      <div id="result-detail" class="scan-detail"></div>
+    </div>
+  </main>
+
+  <script src="js/config.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/nav.js"></script>
+  <!-- Self-hosted QR scanner library (Apache-2.0), see js/vendor/html5-qrcode-LICENSE.txt -->
+  <script src="js/vendor/html5-qrcode.min.js"></script>
+  <script>
+    if (!Auth.isAdmin()) location.href = "index.html";
+
+    const select = document.getElementById("event-select");
+    const counter = document.getElementById("counter");
+    const startBtn = document.getElementById("start-btn");
+    const stopBtn = document.getElementById("stop-btn");
+    let scanner = null;
+    let busy = false;          // true while we wait for the API, so one QR = one request
+    let stats = {};            // eventId -> { checkedIn, registered }
+
+    async function loadEvents() {
+      try {
+        const { events } = await apiFetch("/admin/stats", { auth: true });
+        select.innerHTML = "";
+        // Soonest upcoming event first in the list
+        events.sort((a, b) => a.date.localeCompare(b.date));
+        const now = new Date().toISOString();
+        const firstUpcoming = events.find((e) => e.date >= now);
+        events.forEach((ev) => {
+          stats[ev.eventId] = { checkedIn: ev.checkedIn, registered: ev.registered };
+          const opt = document.createElement("option");
+          opt.value = ev.eventId;
+          opt.textContent = `${ev.title} (${new Date(ev.date).toLocaleDateString("ar-EG")})`;
+          if (firstUpcoming && ev.eventId === firstUpcoming.eventId) opt.selected = true;
+          select.appendChild(opt);
+        });
+        updateCounter();
+      } catch (err) {
+        showMessage("تعذّر تحميل الفعاليات: " + err.message, "error");
+      }
+    }
+
+    function updateCounter() {
+      const s = stats[select.value];
+      counter.textContent = s ? `الحضور: ${s.checkedIn} من ${s.registered} مسجّل` : "";
+    }
+    select.onchange = () => { updateCounter(); hideResult(); };
+
+    function showResult(kind, title, name, detail) {
+      const box = document.getElementById("result");
+      box.className = "scan-result " + kind;
+      document.getElementById("result-icon").textContent = { ok: "✅", warn: "⚠️", bad: "❌" }[kind];
+      document.getElementById("result-title").textContent = title;
+      document.getElementById("result-name").textContent = name || "";
+      document.getElementById("result-detail").textContent = detail || "";
+      box.hidden = false;
+      if (navigator.vibrate) navigator.vibrate(kind === "ok" ? 100 : [100, 80, 100]);
+    }
+    function hideResult() { document.getElementById("result").hidden = true; }
+
+    async function onScan(text) {
+      if (busy) return;
+      busy = true;
+      scanner.pause(true); // freeze the camera while we check
+      try {
+        const res = await apiFetch("/checkin", {
+          method: "POST",
+          auth: true,
+          body: { eventId: select.value, qr: text },
+        });
+        if (res.ok) {
+          stats[select.value].checkedIn++;
+          updateCounter();
+          showResult("ok", res.message, res.name, res.email);
+        } else if (res.code === "ALREADY_USED") {
+          const when = res.checkedInAt ? "دخل الساعة " + new Date(res.checkedInAt).toLocaleTimeString("ar-EG") : "";
+          showResult("warn", res.message, res.name, when);
+        } else {
+          showResult("bad", res.message, res.name, "");
+        }
+      } catch (err) {
+        showResult("bad", "خطأ في الاتصال", "", err.message);
+      }
+      // Ready for the next person after 2.5 seconds
+      setTimeout(() => {
+        busy = false;
+        if (scanner) scanner.resume();
+      }, 2500);
+    }
+
+    startBtn.onclick = async () => {
+      if (!select.value) return showMessage("اختر فعالية أولاً.", "error");
+      scanner = new Html5Qrcode("reader");
+      try {
+        await scanner.start(
+          { facingMode: "environment" },           // back camera on phones
+          { fps: 10, qrbox: { width: 250, height: 250 } },
+          onScan,
+          () => {}                                   // ignore "no QR in this frame" noise
+        );
+        startBtn.hidden = true;
+        stopBtn.hidden = false;
+        select.disabled = true;                      // don't switch events mid-scan
+      } catch (err) {
+        scanner = null;
+        showMessage("تعذّر تشغيل الكاميرا. اسمح للموقع باستخدام الكاميرا. (" + err + ")", "error");
+      }
+    };
+
+    stopBtn.onclick = async () => {
+      if (scanner) await scanner.stop();
+      scanner = null;
+      busy = false;
+      startBtn.hidden = false;
+      stopBtn.hidden = true;
+      select.disabled = false;
+    };
+
+    loadEvents();
+  </script>
+</body>
+</html>

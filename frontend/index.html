@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>الفعاليات القادمة</title>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <nav id="nav" class="nav"></nav>
+
+  <main class="container">
+    <h1>الفعاليات القادمة</h1>
+    <div id="message" class="message" hidden></div>
+    <p id="loading" class="muted">جاري التحميل...</p>
+    <div id="events" class="grid"></div>
+  </main>
+
+  <script src="js/config.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/nav.js"></script>
+  <script>
+    async function loadEvents() {
+      const list = document.getElementById("events");
+      const loading = document.getElementById("loading");
+      try {
+        // Load events, and (if logged in) my tickets, at the same time
+        const [{ events }, myTickets] = await Promise.all([apiFetch("/events"), loadMyTickets()]);
+        list.innerHTML = "";
+        loading.hidden = events.length > 0;
+        loading.textContent = "لا توجد فعاليات قادمة حالياً.";
+        events.forEach((ev) => list.appendChild(eventCard(ev, myTickets.get(ev.eventId))));
+      } catch (err) {
+        loading.hidden = true;
+        showMessage("تعذّر تحميل الفعاليات: " + err.message, "error");
+      }
+    }
+
+    // Returns a Map of eventId -> my ticket (empty when logged out).
+    async function loadMyTickets() {
+      if (!Auth.getUser()) return new Map();
+      try {
+        const { tickets } = await apiFetch("/me/tickets", { auth: true });
+        return new Map(tickets.map((t) => [t.eventId, t]));
+      } catch {
+        return new Map(); // the events list still works if this fails
+      }
+    }
+
+    // Built with DOM methods (textContent) so user data can never inject HTML.
+    function eventCard(ev, myTicket) {
+      const card = document.createElement("article");
+      card.className = "card";
+
+      const detailsUrl = "event.html?id=" + encodeURIComponent(ev.eventId);
+
+      if (ev.imageKey) {
+        const imgLink = document.createElement("a");
+        imgLink.href = detailsUrl;
+        const img = document.createElement("img");
+        img.src = "/" + ev.imageKey;
+        img.alt = ev.title;
+        img.onerror = () => imgLink.remove(); // hide broken images
+        imgLink.appendChild(img);
+        card.appendChild(imgLink);
+      }
+
+      const body = document.createElement("div");
+      body.className = "card-body";
+
+      // The title links to the event details page
+      const title = document.createElement("h2");
+      const titleLink = document.createElement("a");
+      titleLink.href = detailsUrl;
+      titleLink.className = "card-link";
+      titleLink.textContent = ev.title;
+      title.appendChild(titleLink);
+
+      const date = document.createElement("p");
+      date.textContent = "📅 " + formatDate(ev.date);
+
+      const place = document.createElement("p");
+      place.textContent = "📍 " + ev.location;
+
+      const seats = document.createElement("p");
+      seats.className = ev.seatsLeft > 0 ? "seats" : "seats full";
+      seats.textContent = ev.seatsLeft > 0 ? `المقاعد المتبقية: ${ev.seatsLeft} من ${ev.capacity}` : "اكتمل العدد";
+
+      const actions = document.createElement("div");
+      actions.className = "actions";
+
+      if (myTicket?.checkedIn) {
+        // Checked in at the door: no cancel button
+        const done = document.createElement("p");
+        done.className = "registered";
+        done.textContent = "✅ تم تسجيل حضورك";
+        body.append(title, date, place, seats, done);
+      } else if (myTicket) {
+        // Registered: show a label and the cancel button only
+        const done = document.createElement("p");
+        done.className = "registered";
+        done.textContent = "✅ أنت مسجّل";
+
+        const cancel = document.createElement("button");
+        cancel.className = "btn btn-light";
+        cancel.textContent = "إلغاء تسجيلي";
+        cancel.onclick = () => cancelRegistration(ev.eventId, cancel);
+
+        body.append(title, date, place, seats, done);
+        actions.append(cancel);
+      } else {
+        const btn = document.createElement("button");
+        btn.className = "btn";
+        btn.textContent = "سجّل الآن";
+        btn.disabled = ev.seatsLeft <= 0;
+        btn.onclick = () => register(ev.eventId, btn);
+
+        body.append(title, date, place, seats);
+        actions.append(btn);
+      }
+
+      body.appendChild(actions);
+      card.appendChild(body);
+      return card;
+    }
+
+    async function register(eventId, btn) {
+      btn.disabled = true;
+      try {
+        await apiFetch(`/events/${eventId}/register`, { method: "POST", auth: true });
+        showMessage("تم تسجيلك بنجاح 🎉", "success");
+        // GSI1 updates a moment after the write (eventual consistency), so wait 1s before reloading
+        setTimeout(loadEvents, 1000);
+      } catch (err) {
+        showMessage(err.message, "error");
+        btn.disabled = false;
+      }
+    }
+
+    async function cancelRegistration(eventId, btn) {
+      if (!confirm("هل تريد إلغاء تسجيلك في هذه الفعالية؟")) return;
+      btn.disabled = true;
+      try {
+        await apiFetch(`/events/${eventId}/register`, { method: "DELETE", auth: true });
+        showMessage("تم إلغاء تسجيلك.", "success");
+        // GSI1 updates a moment after the write (eventual consistency), so wait 1s before reloading
+        setTimeout(loadEvents, 1000);
+      } catch (err) {
+        showMessage(err.message, "error");
+        btn.disabled = false;
+      }
+    }
+
+    loadEvents();
+  </script>
+</body>
+</html>
