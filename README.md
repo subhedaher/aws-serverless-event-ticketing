@@ -1,6 +1,6 @@
 # 🎟️ Event Ticketing System — Serverless on AWS
 
-A full event registration and ticketing platform built entirely on AWS serverless services.
+A full event registration and ticketing platform built entirely on AWS serverless services and deployed with **Terraform**.
 Users sign up, register for events, receive a QR code ticket by email, get a reminder 24 hours before the event, and are checked in at the door by scanning their QR code.
 
 ![Architecture](docs/architecture.png)
@@ -38,7 +38,8 @@ Users sign up, register for events, receive a QR code ticket by email, get a rem
 - Stats per event: registered, checked in, attendance rate
 
 **Operations**
-- Email alerts when a ticket email fails or a Lambda function errors
+- Email alerts when a ticket email fails, a Lambda function errors, or the API returns `5xx`
+- The whole stack is deployed with one `terraform apply`
 
 ---
 
@@ -48,14 +49,13 @@ Users sign up, register for events, receive a QR code ticket by email, get a rem
 | --- | --- |
 | **Amazon S3** | Private bucket for the website, event images, and QR codes |
 | **Amazon CloudFront** | HTTPS delivery of the site with Origin Access Control (OAC) |
-| **Amazon API Gateway** (HTTP API) | 9 REST routes on a custom domain, JWT authorizer |
+| **Amazon API Gateway** (HTTP API) | 9 routes, JWT authorizer, throttling |
 | **Amazon Cognito** | Sign-up, login, email verification, `admins` group |
-| **AWS Lambda** (Node.js) | 11 functions, each with its own least-privilege IAM role |
+| **AWS Lambda** (Node.js 22, arm64) | 11 functions, each with its own least-privilege IAM role |
 | **Amazon DynamoDB** | Single-table design with one Global Secondary Index |
 | **Amazon SQS** | Queue for ticket emails, with a dead-letter queue |
 | **Amazon EventBridge Scheduler** | One-time reminder schedule per event |
-| **Amazon SES** | Transactional email from `tickets@subhe.site` (DKIM + DMARC) |
-| **AWS Certificate Manager** | Free TLS certificates for both custom domains |
+| **Amazon SES** | Transactional email from `tickets@subhe.site` (DKIM) |
 | **Amazon CloudWatch + SNS** | Logs, alarms, and email alerts |
 
 ---
@@ -129,11 +129,73 @@ When an event is created, `createEvent` creates a **one-time EventBridge schedul
 ### 7. Security
 - **Private S3 bucket**, readable only by this CloudFront distribution (OAC + `AWS:SourceArn` condition)
 - **JWT authorizer** rejects invalid tokens before any Lambda runs; admin routes also check the `admins` group inside the function
-- **One IAM role per function** with only the actions and resources it needs
+- **One IAM role per function** with only the actions and resources it needs (for example, `listEvents` can only `Query` the GSI, not the table)
 - `iam:PassRole` limited to one role and one service (prevents privilege escalation)
-- Default API Gateway endpoint **disabled**; only the custom domain works
-- CORS limited to the site's domain; TLS 1.2 minimum
+- **API throttling** (burst 50, rate 100 requests/second) stops floods before they reach Lambda
+- CORS limited to the site's domain
 - All user input validated in Lambda; user data escaped in HTML and emails
+
+---
+
+## 🏗️ Infrastructure as Code (Terraform)
+
+Every AWS resource is defined in Terraform and split into small modules. `envs/dev` calls the modules and passes the outputs of one module into the inputs of another.
+
+| Module | Creates |
+| --- | --- |
+| `data` | DynamoDB table + `GSI1`, point-in-time recovery |
+| `auth` | Cognito user pool, web app client (no secret), `admins` group |
+| `site` | Private S3 bucket, CloudFront distribution, OAC, bucket policy, CORS for presigned uploads |
+| `messaging` | SQS queue + dead-letter queue (redrive after 3 failures) |
+| `email` | SES domain identity with DKIM |
+| `scheduler` | IAM role that EventBridge Scheduler uses to invoke `sendReminders` |
+| `lambda` | One function + its own IAM role, log group (14-day retention) |
+| `api` | HTTP API, JWT authorizer, integrations, routes, stage, Lambda permissions |
+| `monitoring` | SNS topic + alarms (DLQ not empty, Lambda errors, API `5xx`) |
+
+**Highlights**
+- **One map, eleven functions:** all functions and their permissions are listed once in `lambdas.tf`; `for_each` creates the role, policy, log group, and function for each one.
+- **Least privilege in code:** each function gets only the IAM statements listed for it, built with a `dynamic` block.
+- **No hand-copied values:** the API URL and Cognito client ID are written into `config.js` by `templatefile`, so the site always points at the right resources.
+- **One shared package:** the `backend/` folder is zipped once and used by all functions; a code change updates them through `source_code_hash`.
+- **Remote state:** stored in S3 with versioning and native S3 locking (`use_lockfile`).
+
+### Why three different alarms
+
+| What fails | Lambda errors | API 5xx | DLQ |
+| --- | --- | --- | --- |
+| A function crashes on start (e.g. missing package) | ✅ | | ✅ |
+| `sendTicket` fails to send an email | ❌ handled, returns `batchItemFailures` | | ✅ |
+| An API function hits an unexpected error | ❌ caught by `withErrors`, returns 500 | ✅ | |
+
+Each alarm covers a gap the others miss.
+
+---
+
+## 🚀 Deploy
+
+**Prerequisites**
+- Terraform `>= 1.10`, Node.js 22, AWS credentials
+- An S3 bucket for Terraform state (created once by hand, versioning enabled), set in `infra/envs/dev/versions.tf`
+- A domain you control, for sending email with SES
+
+**Steps**
+
+```bash
+cd backend && npm ci && cd ..
+
+cd infra/envs/dev
+terraform init
+terraform plan -out=tfplan
+terraform apply tfplan
+```
+
+**After the first apply**
+1. Add the three DKIM records from `terraform output dkim_records` to your DNS (CNAME).
+2. Confirm the SNS subscription email to receive alerts.
+3. Sign up on the site, then add your user to the `admins` group in Cognito and log in again.
+
+**Note:** reminder schedules are created at runtime by `createEvent`, so `terraform destroy` does not remove them. Delete any leftover `reminder-*` schedules in EventBridge Scheduler.
 
 ---
 
@@ -167,13 +229,19 @@ frontend/                static site (HTML + vanilla JavaScript)
   tickets.html           my tickets with QR codes
   admin.html             create events + stats
   checkin.html           camera QR scanner
-  js/config.js           API URL, region, Cognito client ID
+  js/config.js           API URL, region, Cognito client ID (generated by Terraform)
+infra/                   Terraform
+  modules/               one folder per part of the system
+  envs/dev/              the dev environment: calls the modules and wires them together
+  templates/             config.js template
 docs/                    architecture diagram, screenshots
 ```
 
 ---
 
 ## 🐛 Problems I Solved
+
+### Application
 
 | Problem | Cause | Fix |
 | --- | --- | --- |
@@ -186,6 +254,17 @@ docs/                    architecture diagram, screenshots
 | Cancel button returned "not registered" after check-in | One transaction condition covered two different failures | `ReturnValuesOnConditionCheckFailure: ALL_OLD` to return the right message |
 | A Lambda-errors alarm would miss failed ticket emails | The worker handles errors and returns `batchItemFailures`, so Lambda counts the run as successful | A separate alarm on the dead-letter queue |
 
+### Terraform
+
+| Problem | Cause | Fix |
+| --- | --- | --- |
+| Ticket emails stopped; messages landed in the DLQ | `node_modules` was missing from the Lambda zip, so `qrcode` could not load | `npm ci` before packaging, then **DLQ redrive** sent the failed messages again, no data lost |
+| `AlreadyExistsException` for the SES identity | The identity was created by hand before Terraform | `import` block to bring it under Terraform without recreating it |
+| Dependency cycle between S3 and CloudFront | Bucket CORS and policy need the distribution, and the distribution needs the bucket | Separate `aws_s3_bucket_cors_configuration` and `aws_s3_bucket_policy` resources |
+| Login failed after deploy | App client allowed SRP, but the site uses `USER_PASSWORD_AUTH` | Read the frontend code and enabled only the flows it uses |
+| Deprecation warning on the GSI | `hash_key` / `range_key` inside a GSI are deprecated | `key_schema` blocks |
+| Log groups with no retention | Lambda creates its own log group on first run | Log group in Terraform with 14-day retention, and `depends_on` so it exists first |
+
 ---
 
 ## 💰 Cost
@@ -196,14 +275,16 @@ Everything is serverless and pay-per-use. With low traffic the monthly cost is a
 
 ## 🚀 Roadmap
 
-- [ ] Infrastructure as Code with AWS SAM (one-command deploy)
-- [ ] CI/CD with GitHub Actions
-- [ ] Unit tests for the Lambda functions
+- [x] Infrastructure as Code with Terraform (one-command deploy)
+- [x] API Gateway `5xx` alarm
 - [x] SES production access (send to any email address)
-- [ ] API Gateway `5xx` alarm
+- [ ] CI/CD with GitHub Actions (OIDC, `plan` on pull requests, `apply` on `main`)
+- [ ] Custom domains with Route 53 and ACM
+- [ ] A `prod` environment using the same modules
+- [ ] Unit tests for the Lambda functions
 
 ---
 
 ## 👤 Author
 
-**Subhe Daher** — built while learning AWS serverless architecture.
+**Subhe Daher** — built while learning AWS serverless architecture and Terraform.
